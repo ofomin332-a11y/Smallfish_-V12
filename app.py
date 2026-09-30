@@ -352,7 +352,10 @@ async def main():
                     if now-last_alert.get(key,0)<COOLDOWN:continue
                     await telegram(s,signal(sym,m) if m.get('ready') else early_signal(sym,m)); last_alert[key]=now
                     if m.get('ready'):
-                        signals+=1; LOG.info("SIGNAL %s %s score=%s zone=%s-%s",m["side"],sym,m["score"],m["zone_lo"],m["zone_hi"])
+                        # Arm the TP-only 0.48% reversal only after the real V9 signal
+                        # has been sent. The signal-generation logic above is unchanged.
+                        arm_reversal(sym, m)
+                        signals+=1; LOG.info("SIGNAL %s %s score=%s zone=%s-%s | reversal armed at %.2f%% toward TP",m["side"],sym,m["score"],m["zone_lo"],m["zone_hi"],REVERSAL_PCT*100)
                     else:
                         LOG.info("EARLY SETUP %s %s score=%s zone=%s-%s",m["side"],sym,m["score"],m["zone_lo"],m["zone_hi"])
                 except Exception as e:LOG.warning("%s scan failed: %s",sym,e)
