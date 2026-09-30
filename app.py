@@ -23,9 +23,6 @@ DIAG = os.getenv("DIAGNOSTICS", "true").lower() in {"1", "true", "yes", "on"}
 MEXC = "https://api.mexc.com"
 KLINE = "/api/v1/contract/kline"
 DEPTH = "/api/v1/contract/depth"
-TICKER = "/api/v1/contract/ticker"
-REVERSAL_PCT = float(os.getenv("REVERSAL_PCT", "0.48")) / 100.0
-active_signals = {}
 last_alert = {}
 cache = {}
 
@@ -100,16 +97,6 @@ async def candles(session,symbol,interval):
             return old[1]
         raise RuntimeError(f"not enough {interval} candles: {len(c)}")
     c=c[-300:]; cache[key]=(now,c); return c
-
-async def ticker(session,symbol):
-    fs=symbol.replace("USDT","_USDT")
-    d=await request(session,f"{TICKER}/{fs}",{})
-    d=d.get("data",d) if isinstance(d,dict) else d
-    if isinstance(d,dict):
-        for k in ("lastPrice","last","price","fairPrice"):
-            if d.get(k) is not None:
-                return float(d[k])
-    raise RuntimeError("ticker price unavailable")
 
 async def book(session,symbol):
     key=(symbol,"book"); now=time.time(); old=cache.get(key)
@@ -270,59 +257,6 @@ def early_signal(sym,m):
             f"OBI: {m['obi']:+.2f}\nVolume: {m['volume']:.2f}x\n\n"
             f"⚠️ Early setup: wait for entry-zone/retest confirmation. No orders are placed.")
 
-def arm_reversal(sym,m):
-    # Arm only on a real/final V9 signal. The existing signal logic is untouched.
-    side=m["side"]
-    e=m["entry"]
-    sw=m["sweep"]
-    a=sw["atr"]
-    if side=="LONG":
-        old_sl=sw["extreme"]-a*0.20
-        risk=max(e-old_sl,e*0.002)
-        old_tp=e+max(risk*2.2,e*0.008)
-    else:
-        old_sl=sw["extreme"]+a*0.20
-        risk=max(old_sl-e,e*0.002)
-        old_tp=e-max(risk*2.2,e*0.008)
-    active_signals[sym]={"side":side,"entry":e,"tp":old_tp,"sl":old_sl,"reversed":False}
-
-def reversal_hit(item,price):
-    e=item["entry"]
-    side=item["side"]
-    if side=="SHORT":
-        # Only the TP-side move: 0.48% down from original entry.
-        return price <= e*(1-REVERSAL_PCT)
-    # Only the TP-side move: 0.48% up from original entry.
-    return price >= e*(1+REVERSAL_PCT)
-
-def reversal_message(sym,item,price):
-    old_side=item["side"]
-    new_side="LONG" if old_side=="SHORT" else "SHORT"
-    icon="🟢 LONG" if new_side=="LONG" else "🔴 SHORT"
-    e=item["entry"]
-    sl=e*(1-0.02) if new_side=="LONG" else e*(1+0.02)
-    now=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    return (f"🔄 SMALLFISH AUTO REVERSAL\n\n{icon} {sym}\n\n"
-            f"Entry: {e:.8g}\n"
-            f"TP: {e:.8g}\n"
-            f"SL: {sl:.8g}\n\n"
-            f"Trigger: {REVERSAL_PCT*100:.2f}% from original Entry toward TP\n"
-            f"Current: {price:.8g}\n"
-            f"⚠️ No CHoCH/sweep/confirmation required.\n"
-            f"{now}")
-
-async def check_reversals(s):
-    for sym,item in list(active_signals.items()):
-        if item.get("reversed"): continue
-        try:
-            price=await ticker(s,sym)
-            if reversal_hit(item,price):
-                await telegram(s,reversal_message(sym,item,price))
-                item["reversed"]=True
-                LOG.info("AUTO REVERSAL %s %s -> %s at %.8g",sym,item["side"],"LONG" if item["side"]=="SHORT" else "SHORT",price)
-        except Exception as e:
-            LOG.warning("%s reversal check failed: %s",sym,e)
-
 async def telegram(s,text):
     if not TOKEN or not CHAT:return
     async with s.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",json={"chat_id":CHAT,"text":text},timeout=aiohttp.ClientTimeout(total=10)) as r:
@@ -339,7 +273,6 @@ async def main():
             except Exception as e: LOG.warning("Telegram startup failed: %s",e)
         while True:
             started=time.monotonic(); signals=0
-            await check_reversals(s)
             for sym in SYMBOLS:
                 try:
                     h,m15,c5,c1=await asyncio.gather(candles(s,sym,"1h"),candles(s,sym,"15m"),candles(s,sym,"5m"),candles(s,sym,"1m"))
