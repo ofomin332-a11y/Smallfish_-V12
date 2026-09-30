@@ -1,21 +1,6 @@
-# Smallfish — Public Signal Mode
+# Smallfish Public Signal Mode v9
+Railway-ready, MEXC public futures data only. No MEXC API key/secret and no orders.
 
-Signal-only deployment for Railway.
+Pattern: liquidity sweep -> 10m CHoCH -> fresh bias -> EARLY setup -> 5m/1m trigger -> final signal.
 
-- Uses MEXC public market data.
-- No MEXC API key or secret is required.
-- Does not place, cancel, or manage orders.
-- Sends qualifying signals to Telegram.
-- Default symbols: SOLUSDT, SUIUSDT, XRPUSDT, DOGEUSDT, ADAUSDT.
-- Multi-timeframe inputs: 1h, 15m, 5m, 1m.
-- Default polling: 30 seconds.
-
-Railway variables:
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-
-Optional:
-SYMBOLS
-POLL_SECONDS
-MIN_SCORE
-ALERT_COOLDOWN_SECONDS
+V9 adds an EARLY SETUP Telegram alert when a fresh sweep+CHoCH is detected, instead of waiting until price is already several ATR away. Final SIGNAL still requires 5m + 1m confirmation and location filters.
