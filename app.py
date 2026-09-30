@@ -36,7 +36,8 @@ SPOT_TICKER = "/api/v3/ticker/24hr"
 
 last_alert = {}
 active_signals = {}
-REVERSAL_PCT = 0.0048  # 0.48% from the original Entry, both directions
+REVERSAL_PCT = 0.0048  # 0.48% from original Entry, ONLY in the TP direction
+REVERSAL_SL_PCT = 0.02  # reversal SL is always 2% from reversal Entry
 
 def ema(values, period):
     if len(values) < period:
@@ -203,29 +204,39 @@ async def ticker(session, symbol):
     return float(last)
 
 
-def reversal_levels(entry):
+def reversal_levels(entry, side):
+    # Only the move toward the original TP can trigger a reversal.
+    # SHORT: price must fall 0.48% from Entry.
+    # LONG:  price must rise 0.48% from Entry.
     move = entry * REVERSAL_PCT
-    return entry + move, entry - move
+    if side == "SHORT":
+        return entry - move
+    return entry + move
+
+
+def reversal_sl(entry, new_side):
+    # The reversal signal always gets a 2% SL from its own Entry.
+    if new_side == "LONG":
+        return entry * (1 - REVERSAL_SL_PCT)
+    return entry * (1 + REVERSAL_SL_PCT)
 
 
 def fmt_reversal(symbol, state, price, trigger):
     old_side = state["side"]
     new_side = "SHORT" if old_side == "LONG" else "LONG"
-    entry = state["entry"]
-    old_sl = state["sl"]
-    old_tp = state["tp"]
-    upper, lower = reversal_levels(entry)
+    original_entry = state["entry"]
+    trigger_level = reversal_levels(original_entry, old_side)
+    sl = reversal_sl(price, new_side)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return (
         f"🐟 SMALLFISH REVERSAL\n\n"
         f"{'🟢' if new_side == 'LONG' else '🔴'} {new_side} {symbol}\n\n"
         f"Entry: {price:.8g}\n"
-        f"TP1: {entry:.8g}  ← previous Entry\n"
-        f"TP2: {old_sl:.8g}  ← previous SL\n"
-        f"SL: {old_tp:.8g}  ← previous TP\n\n"
-        f"0.48% trigger: {'+' if trigger == 'UP' else '-'}0.48% from Entry ✓\n"
-        f"Trigger level: {(upper if trigger == 'UP' else lower):.8g}\n"
-        f"Original {old_side}: Entry {entry:.8g} | SL {old_sl:.8g} | TP {old_tp:.8g}\n\n"
+        f"TP: {original_entry:.8g}  ← previous Entry\n"
+        f"SL: {sl:.8g}  ← 2% from reversal Entry\n\n"
+        f"0.48% trigger: move toward original TP ✓\n"
+        f"Trigger level: {trigger_level:.8g}\n"
+        f"Original {old_side}: Entry {original_entry:.8g}\n\n"
         f"⚠️ Signal-only. No orders are placed.\n{now}"
     )
 
@@ -236,34 +247,33 @@ async def check_reversal(session, symbol, price):
         return False
 
     entry = state["entry"]
-    upper, lower = reversal_levels(entry)
+    side = state["side"]
+    trigger_level = reversal_levels(entry, side)
     LOG.info(
-        "TRACK %s %s entry=%.8g price=%.8g upper=%.8g lower=%.8g",
-        symbol, state["side"], entry, price, upper, lower
+        "TRACK %s %s entry=%.8g price=%.8g tp_trigger=%.8g",
+        symbol, side, entry, price, trigger_level
     )
 
-    trigger = None
-    if price >= upper:
-        trigger = "UP"
-    elif price <= lower:
-        trigger = "DOWN"
+    # IMPORTANT: ignore the 0.48% move toward the original SL.
+    if side == "SHORT":
+        triggered = price <= trigger_level
+    else:
+        triggered = price >= trigger_level
 
-    if trigger is None:
+    if not triggered:
         return False
 
     state["reversed"] = True
-    state["trigger"] = trigger
+    state["trigger"] = "TP_DIRECTION"
     state["trigger_price"] = price
-    new_side = "SHORT" if state["side"] == "LONG" else "LONG"
+    new_side = "SHORT" if side == "LONG" else "LONG"
     LOG.info(
-        "REVERSAL %s %s -> %s price=%.8g trigger=%s level=%.8g",
-        symbol, state["side"], new_side, price, trigger,
-        upper if trigger == "UP" else lower,
+        "REVERSAL %s %s -> %s price=%.8g trigger_level=%.8g",
+        symbol, side, new_side, price, trigger_level
     )
     try:
-        await send_telegram(session, fmt_reversal(symbol, state, price, trigger))
+        await send_telegram(session, fmt_reversal(symbol, state, price, "TP_DIRECTION"))
     except Exception:
-        # Do not lose the trigger state if Telegram is temporarily unavailable.
         state["reversed"] = False
         raise
     return True
@@ -376,10 +386,10 @@ async def main():
                         "reversed": False,
                         "created": now,
                     }
-                    upper, lower = reversal_levels(entry)
+                    trigger_level = reversal_levels(entry, side)
                     LOG.info(
-                        "TRACK START %s %s entry=%.8g upper=%.8g lower=%.8g",
-                        symbol, side, entry, upper, lower
+                        "TRACK START %s %s entry=%.8g tp_trigger=%.8g",
+                        symbol, side, entry, trigger_level
                     )
                     signals+=1
                 except Exception as e:
