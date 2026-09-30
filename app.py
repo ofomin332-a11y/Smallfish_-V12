@@ -12,6 +12,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "LINKUSDT,BTCUSDT,ETH
 POLL = int(os.getenv("POLL_SECONDS", "30"))
 MIN_SCORE = float(os.getenv("MIN_SCORE", "7"))
 COOLDOWN = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
+REVERSAL_PCT = float(os.getenv("REVERSAL_PCT", "0.48"))
 SWEEP_LOOKBACK = int(os.getenv("SWEEP_LOOKBACK", "12"))
 SWEEP_MAX_AGE = int(os.getenv("SWEEP_MAX_AGE", "12"))
 FRESH_SWEEP_AGE = int(os.getenv("FRESH_SWEEP_AGE", "4"))
@@ -25,6 +26,8 @@ KLINE = "/api/v1/contract/kline"
 DEPTH = "/api/v1/contract/depth"
 last_alert = {}
 cache = {}
+# Final signals currently being tracked for the automatic 48% reversal.
+active_signals = {}
 
 TTL = {"1m": 12, "5m": 25, "15m": 90, "1h": 300}
 MS = {"1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000}
@@ -246,7 +249,7 @@ def diag(sym,m):
             f"OBI={m['obi']:+.2f} | V={m['volume']:.2f}x | ext={m['ext']:.2f}ATR | {m['wait']}")
 
 def early_signal(sym,m):
-    side=m["side"]; icon="🟢 LONG SETUP" if side=="LONG" else "🔴 SHORT SETUP"
+    side=m['side']; icon='🟢 LONG SETUP' if side=='LONG' else '🔴 SHORT SETUP'
     return (f"🐟 SMALLFISH V9 EARLY\n\n{icon} {sym}\n\n"
             f"Entry zone: {m['zone_lo']:.6g} - {m['zone_hi']:.6g}\n"
             f"Current: {m['entry']:.6g}\n"
@@ -256,6 +259,86 @@ def early_signal(sym,m):
             f"1m trigger: {'✓' if m['micro'] else 'waiting'}\n"
             f"OBI: {m['obi']:+.2f}\nVolume: {m['volume']:.2f}x\n\n"
             f"⚠️ Early setup: wait for entry-zone/retest confirmation. No orders are placed.")
+
+def build_signal_levels(m):
+    """Return the exact original Entry/SL/TP used by the normal V9 signal."""
+    e=m["entry"]; sw=m["sweep"]; a=sw["atr"]
+    if m["side"]=="LONG":
+        sl=sw["extreme"]-a*0.20
+        risk=max(e-sl,e*.002)
+        tp=e+max(risk*2.2,e*.008)
+    else:
+        sl=sw["extreme"]+a*0.20
+        risk=max(sl-e,e*.002)
+        tp=e-max(risk*2.2,e*.008)
+    return float(e), float(sl), float(tp)
+
+
+def reversal_trigger(signal, price):
+    """Check whether price has travelled 48% toward the original TP or SL.
+
+    The first side reached wins. No extra market-structure confirmation is used.
+    """
+    e=signal["entry"]; sl=signal["sl"]; tp=signal["tp"]; pct=REVERSAL_PCT
+    tp_level=e+(tp-e)*pct
+    sl_level=e+(sl-e)*pct
+    side=signal["side"]
+    if side=="LONG":
+        if price>=tp_level:
+            return "TP", tp_level
+        if price<=sl_level:
+            return "SL", sl_level
+    else:
+        if price<=tp_level:
+            return "TP", tp_level
+        if price>=sl_level:
+            return "SL", sl_level
+    return None, None
+
+
+def reversal_text(sym, original, price, trigger_side, trigger_level):
+    old_side=original["side"]
+    new_side="SHORT" if old_side=="LONG" else "LONG"
+    icon="🔴 SHORT" if new_side=="SHORT" else "🟢 LONG"
+    if trigger_side=="TP":
+        tp1=original["entry"]
+        tp2=original["sl"]
+        path="48% шляху до TP"
+    else:
+        tp1=original["entry"]
+        tp2=original["tp"]
+        path="48% шляху до SL"
+    return (
+        f"🐟 SMALLFISH AUTO REVERSAL V9\n\n"
+        f"{icon} {sym}\n\n"
+        f"Розворот: {path}\n"
+        f"Trigger price: {trigger_level:.8g}\n"
+        f"Entry: {price:.8g}\n\n"
+        f"TP1: {tp1:.8g}\n"
+        f"TP2: {tp2:.8g}\n\n"
+        f"Попередній сигнал: {'🟢 LONG' if old_side=='LONG' else '🔴 SHORT'}\n"
+        f"Попередній Entry: {original['entry']:.8g}\n"
+        f"Попередній SL: {original['sl']:.8g}\n"
+        f"Попередній TP: {original['tp']:.8g}\n\n"
+        f"⚡ Розворот автоматичний на {REVERSAL_PCT*100:.0f}%. Без додаткового CHoCH/sweep підтвердження.\n"
+        f"⚠️ Signal-only. No orders are placed."
+    )
+
+
+async def check_reversals(s, sym, price):
+    """Track an already-issued final V9 signal and fire one opposite signal."""
+    signal=active_signals.get(sym)
+    if not signal:
+        return False
+    trigger, level=reversal_trigger(signal, price)
+    if not trigger:
+        return False
+    text=reversal_text(sym, signal, price, trigger, level)
+    await telegram(s, text)
+    active_signals.pop(sym, None)
+    LOG.info("AUTO REVERSAL %s %s | trigger=%s | price=%s | level=%s", sym, signal["side"], trigger, price, level)
+    return True
+
 
 async def telegram(s,text):
     if not TOKEN or not CHAT:return
@@ -276,6 +359,8 @@ async def main():
             for sym in SYMBOLS:
                 try:
                     h,m15,c5,c1=await asyncio.gather(candles(s,sym,"1h"),candles(s,sym,"15m"),candles(s,sym,"5m"),candles(s,sym,"1m"))
+                    current_price=float(c1[-1][4])
+                    await check_reversals(s, sym, current_price)
                     c10=agg10(c5)
                     if len(c10)<25:raise RuntimeError(f"not enough derived 10m candles: {len(c10)}")
                     b,a=await book(s,sym); m=analyze(h,m15,c5,c1,c10,b,a)
@@ -285,7 +370,9 @@ async def main():
                     if now-last_alert.get(key,0)<COOLDOWN:continue
                     await telegram(s,signal(sym,m) if m.get('ready') else early_signal(sym,m)); last_alert[key]=now
                     if m.get('ready'):
-                        signals+=1; LOG.info("SIGNAL %s %s score=%s zone=%s-%s",m["side"],sym,m["score"],m["zone_lo"],m["zone_hi"])
+                        e,sl,tp=build_signal_levels(m)
+                        active_signals[sym]={"side":m["side"],"entry":e,"sl":sl,"tp":tp,"created":time.time()}
+                        signals+=1; LOG.info("SIGNAL %s %s score=%s zone=%s-%s | reversal tracking armed at %.0f%%",m["side"],sym,m["score"],m["zone_lo"],m["zone_hi"],REVERSAL_PCT*100)
                     else:
                         LOG.info("EARLY SETUP %s %s score=%s zone=%s-%s",m["side"],sym,m["score"],m["zone_lo"],m["zone_hi"])
                 except Exception as e:LOG.warning("%s scan failed: %s",sym,e)
