@@ -23,6 +23,10 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
 MIN_SCORE = float(os.getenv("MIN_SCORE", "7"))
 ALERT_COOLDOWN = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 
+# Auto-reversal is an add-on only. The original signal-generation logic below is unchanged.
+REVERSAL_PCT = float(os.getenv("REVERSAL_PCT", "0.45")) / 100.0
+active_reversals = {}
+
 # This is deliberately signal-only: no account endpoints, no orders,
 # no API key/secret and no exchange credentials are required.
 MEXC_PUBLIC = "https://api.mexc.com"
@@ -136,6 +140,69 @@ async def depth(session, symbol):
         raise RuntimeError(f"empty futures order book for {symbol}")
     return bids,asks
 
+async def current_price(session, symbol):
+    fs=symbol.replace("USDT","_USDT")
+    d=await get_json(session, f"{FUTURES_TICKER}/{fs}", {}, base=MEXC_CONTRACT)
+    data=d.get("data", d) if isinstance(d, dict) else d
+    if isinstance(data, list) and data:
+        data=data[0]
+    if isinstance(data, dict):
+        for key in ("lastPrice", "last", "price", "fairPrice", "indexPrice"):
+            if data.get(key) is not None:
+                return float(data[key])
+    raise RuntimeError(f"no usable futures ticker for {symbol}")
+
+def arm_reversal(symbol, side, entry, sl, tp):
+    # Only the TP-side 0.45% trigger is tracked. SL-side reversal does not exist.
+    active_reversals[symbol] = {
+        "side": side,
+        "entry": float(entry),
+        "sl": float(sl),
+        "tp": float(tp),
+        "triggered": False,
+    }
+
+def reversal_message(symbol, old_side, entry, trigger_price, old_sl):
+    new_side = "SHORT" if old_side == "LONG" else "LONG"
+    new_sl = entry * (1.0 - 0.02) if new_side == "LONG" else entry * (1.0 + 0.02)
+    return (
+        f"🔄 SMALLFISH AUTO REVERSAL\n\n"
+        f"{'🟢' if new_side=='LONG' else '🔴'} {new_side} {symbol}\n"
+        f"Entry: {entry:.8g}\n"
+        f"TP: {entry:.8g}\n"
+        f"SL: {new_sl:.8g}\n\n"
+        f"Trigger: {REVERSAL_PCT*100:.2f}% from original Entry toward TP\n"
+        f"Trigger price: {trigger_price:.8g}\n"
+        f"Original Entry: {entry:.8g}\n"
+        f"Original SL: {old_sl:.8g}\n"
+        f"⚠️ Auto reversal only. No additional confirmation. No orders are placed.\n"
+    )
+
+async def check_reversals(session):
+    for symbol, state in list(active_reversals.items()):
+        if state.get("triggered"):
+            continue
+        try:
+            price=await current_price(session, symbol)
+            entry=state["entry"]
+            side=state["side"]
+            # Only movement in the original TP direction can trigger reversal.
+            if side == "LONG":
+                trigger=entry * (1.0 + REVERSAL_PCT)
+                hit=price >= trigger
+            else:
+                trigger=entry * (1.0 - REVERSAL_PCT)
+                hit=price <= trigger
+            if not hit:
+                continue
+            msg=reversal_message(symbol, side, entry, price, state["sl"])
+            await send_telegram(session, msg)
+            state["triggered"] = True
+            LOG.info("AUTO REVERSAL %s %s | original_entry=%s | trigger=%s | price=%s",
+                     "SHORT" if side=="LONG" else "LONG", symbol, entry, trigger, price)
+        except Exception as e:
+            LOG.warning("%s reversal check failed: %s", symbol, e)
+
 def score_setup(c1h,c15,c5,c1m,bids,asks):
     close1=c1h[-1][4]
     e20h=ema([x[4] for x in c1h],20)
@@ -238,6 +305,8 @@ async def main():
         while True:
             started=time.monotonic()
             signals=0
+            # Check already-issued signals first. This does not alter signal generation.
+            await check_reversals(session)
             for symbol in SYMBOLS:
                 try:
                     c1h,c15,c5,c1m = await asyncio.gather(
@@ -259,6 +328,12 @@ async def main():
                     msg=fmt_signal(symbol,side,score,entry,atr(c5),reasons,rsi_v,obi,vr)
                     LOG.info("SIGNAL %s %s score=%.0f entry=%s",side,symbol,score,entry)
                     await send_telegram(session,msg)
+                    # Arm reversal only after the original signal has been sent successfully.
+                    risk=max(atr(c5)*0.8, entry*0.0025)
+                    target=max(entry*0.006, risk*1.5)
+                    original_sl=entry-risk if side=="LONG" else entry+risk
+                    original_tp=entry+target if side=="LONG" else entry-target
+                    arm_reversal(symbol, side, entry, original_sl, original_tp)
                     last_alert[key]=now
                     signals+=1
                 except Exception as e:
