@@ -263,12 +263,7 @@ async def main():
              len(SYMBOLS), POLL_SECONDS)
     LOG.info("MEXC public market data only | no API key/secret | no orders")
     async with aiohttp.ClientSession(headers={"User-Agent":"smallfish-public-signal/1.0"}) as session:
-        # Validate Telegram once.
-        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-            try:
-                await send_telegram(session, "🐟 SMALLFISH PUBLIC SIGNAL MODE ONLINE\nNo MEXC API key/secret required.\nNo orders are placed.")
-            except Exception as e:
-                LOG.warning("Telegram startup message failed: %s", e)
+        # Telegram is used only for reversal notifications.
 
         while True:
             started=time.monotonic()
@@ -284,7 +279,7 @@ async def main():
                     bids,asks=await depth(session,symbol)
                     current_mid=(float(bids[0][0])+float(asks[0][0]))/2 if bids and asks else c5[-1][4]
 
-                    # Standalone reversal monitor: only after a real signal was sent.
+                    # Standalone reversal monitor: armed from locally tracked signals.
                     state=active_reversals.get(symbol)
                     if state and not state.get("triggered") and reversal_triggered(state,current_mid):
                         reversal_msg=fmt_reversal(symbol,state["side"],state["entry"],current_mid)
@@ -304,11 +299,10 @@ async def main():
                     now=time.time()
                     if now-last_alert.get(key,0) < ALERT_COOLDOWN:
                         continue
-                    msg=fmt_signal(symbol,side,score,entry,atr(c5),reasons,rsi_v,obi,vr)
-                    LOG.info("SIGNAL %s %s score=%.0f entry=%s",side,symbol,score,entry)
-                    await send_telegram(session,msg)
+                    # Original signals are logged and tracked locally, but are NOT sent to Telegram.
+                    LOG.info("SIGNAL TRACKED %s %s score=%.0f entry=%s (Telegram suppressed)",
+                             side,symbol,score,entry)
                     last_alert[key]=now
-                    # Arm reversal only after the original Telegram signal succeeds.
                     risk=max(atr(c5)*0.8, entry*0.0025)
                     target=max(entry*0.006, risk*1.5)
                     tp=entry+target if side=="LONG" else entry-target
