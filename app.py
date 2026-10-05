@@ -17,7 +17,7 @@ LOG = logging.getLogger("smallfish-public")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 SYMBOLS = [s.strip().upper() for s in os.getenv(
-    "SYMBOLS", "SOLUSDT,SUIUSDT,XRPUSDT,DOGEUSDT,ADAUSDT"
+    "SYMBOLS", "SOLUSDT,SUIUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT,AVAXUSDT,NEARUSDT,APTUSDT,HBARUSDT,FETUSDT,JUPUSDT"
 ).split(",") if s.strip()]
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
 MIN_SCORE = float(os.getenv("MIN_SCORE", "7"))
