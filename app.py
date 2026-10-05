@@ -26,7 +26,7 @@ ALERT_COOLDOWN = int(os.getenv("ALERT_COOLDOWN_SECONDS", "900"))
 # This is deliberately signal-only: no account endpoints, no orders,
 # no API key/secret and no exchange credentials are required.
 MEXC_PUBLIC = "https://api.mexc.com"
-MEXC_CONTRACT = "https://contract.mexc.com"
+MEXC_CONTRACT = "https://api.mexc.com"
 FUTURES_KLINE = "/api/v1/contract/kline"
 SPOT_KLINE = "/api/v3/klines"
 FUTURES_DEPTH = "/api/v1/contract/depth"
